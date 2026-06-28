@@ -1,20 +1,18 @@
 import torch
 import torch.nn as nn
-import fairseq
+#import fairseq
 import math
 ___author__ = "Tianchi Liu"
 __email__ = "tianchi_liu@u.nus.edu"
 # modified from the model script from Hemlata Tak
 
 class SSLModel(nn.Module):
-    def __init__(self,device):
+    def __init__(self, device):
         super(SSLModel, self).__init__()
-        cp_path = 'xlsr2_300m.pt'   # Change the pre-trained XLSR model path. 
-        model, cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task([cp_path])
-        self.model = model[0]
-        self.device=device
+        from transformers import WavLMModel
+        self.model = WavLMModel.from_pretrained("/root/autodl-tmp/Nes2Net_ASVspoof_ITW/wavlm-large")
+        self.device = device
         self.out_dim = 1024
-        return
 
     def extract_feat(self, input_data):
         # put the model to GPU if it not there
@@ -22,14 +20,16 @@ class SSLModel(nn.Module):
            or next(self.model.parameters()).dtype != input_data.dtype:
             self.model.to(input_data.device, dtype=input_data.dtype)
             self.model.train()
-        if True:
-            # input should be in shape (batch, length)
-            if input_data.ndim == 3:
-                input_tmp = input_data[:, :, 0]
-            else:
-                input_tmp = input_data
-            # [batch, length, dim]
-            emb = self.model(input_tmp, mask=False, features_only=True)['x']
+
+        # input should be in shape (batch, length)
+        if input_data.ndim == 3:
+            input_tmp = input_data[:, :, 0]
+        else:
+            input_tmp = input_data
+
+        # WavLM: 输入输出 shape 和 wav2vec 2.0 完全一样
+        emb = self.model(input_tmp).last_hidden_state
+        # shape: (B, 200, 1024)
         return emb
 
 class SEModule(nn.Module):
