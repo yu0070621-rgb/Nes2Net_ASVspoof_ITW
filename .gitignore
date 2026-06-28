@@ -21,3 +21,11 @@ Test_*.txt
 Thumbs.db
 *.log
 
+__pycache__/
+*.pyc
+logs/
+models/
+score_*.txt
+*.tar.gz
+*.zip
+LA/

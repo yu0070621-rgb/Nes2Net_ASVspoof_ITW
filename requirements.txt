@@ -4,7 +4,7 @@ audioread==3.0.1
 backcall==0.2.0
 bitarray==2.9.2
 cachetools==5.3.2
-certifi @ file:///croot/certifi_1671487769961/work/certifi
+certifi==2022.12.7
 cffi==1.15.1
 charset-normalizer==3.3.2
 colorama==0.4.6
@@ -16,7 +16,7 @@ google-auth==2.26.1
 google-auth-oauthlib==0.4.6
 grpcio==1.60.0
 huggingface-hub==0.16.4
-hydra-core==1.0.7
+hydra-core
 idna==3.6
 importlib-metadata==6.7.0
 importlib-resources==5.12.0
@@ -33,7 +33,7 @@ matplotlib-inline==0.1.6
 numba==0.56.4
 numpy==1.21.6
 oauthlib==3.2.2
-omegaconf==2.0.6
+omegaconf
 packaging==23.2
 pandas==1.3.5
 parso==0.8.4
@@ -59,7 +59,7 @@ requests==2.31.0
 requests-oauthlib==1.3.1
 resampy==0.4.2
 rsa==4.9
-s3prl==0.4.15
+s3prl
 sacrebleu==2.4.0
 safetensors==0.4.3
 scikit-learn==1.0.2

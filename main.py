@@ -9,6 +9,7 @@ from data_utils_SSL import genSpoof_list, Dataset_ASVspoof2019_train, Dataset_AS
 from tensorboardX import SummaryWriter
 from startup_config import set_random_seed
 import time
+from torch.cuda.amp import autocast, GradScaler
 
 def pad(x, max_len):
     x_len = x.shape[0]
@@ -73,8 +74,7 @@ if __name__ == '__main__':
                         help='number of output logits for the model, default is 2, following wav2vec2-AASIST repo')
     parser.add_argument('--date', type=str, default='unknown',
                         help='date')
-    parser.add_argument('--model_name', type=str, required=True, choices=['wav2vec2_AASIST', 'wav2vec2_Nes2Net_X'],
-                        help='the type of the model, check from the choices')
+    parser.add_argument('--model_name', ..., choices=['wav2vec2_AASIST', 'wav2vec2_Nes2Net_X', 'wav2vec2_Nes2Net_X_SeLU'])                        help='the type of the model, check from the choices')
     parser.add_argument('--protocols_path', type=str, default='database/',
                         help='Change with path to user\'s LA database protocols directory address')
     parser.add_argument('--test_length', type=str, default='4s', choices=['full', '4s'],
@@ -223,6 +223,7 @@ if __name__ == '__main__':
 
     # set Adam optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scaler = GradScaler()
 
     # load model or average checkpoints
     if args.num_average_model > 1:  # average checkpoints
@@ -298,7 +299,7 @@ if __name__ == '__main__':
 
     train_set = Dataset_ASVspoof2019_train(args, list_IDs=file_train, labels=d_label_trn, base_dir=os.path.join(args.database_path + 'ASVspoof2019_LA_train/'), algo=args.algo)
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=6, shuffle=True, drop_last=True)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=12, shuffle=True, drop_last=True, pin_memory=True, prefetch_factor=4)
 
     del train_set, d_label_trn
 
@@ -318,8 +319,8 @@ if __name__ == '__main__':
                                          labels=d_label_dev,
                                          base_dir=os.path.join(
                                              args.database_path + 'ASVspoof2019_LA_dev/'), algo=0)
-    dev_loader_w_aug = DataLoader(dev_set_w_aug, batch_size=args.batch_size, num_workers=6, shuffle=False)
-    dev_loader_wo_aug = DataLoader(dev_set_wo_aug, batch_size=args.batch_size, num_workers=6, shuffle=False)
+    dev_loader_w_aug = DataLoader(dev_set_w_aug, batch_size=args.batch_size, num_workers=8, shuffle=False, pin_memory=True, prefetch_factor=4)
+    dev_loader_wo_aug = DataLoader(dev_set_wo_aug, batch_size=args.batch_size, num_workers=8, shuffle=False, pin_memory=True, prefetch_factor=4)
     del dev_set_w_aug, dev_set_wo_aug, d_label_dev
 
     # Training and validation
@@ -346,61 +347,70 @@ if __name__ == '__main__':
             num_total += batch_size
             batch_x = batch_x.to(device)
             batch_y = batch_y.view(-1).type(torch.int64).to(device)
-            batch_out = model(batch_x)
-            batch_loss = criterion(batch_out, batch_y)
+            with autocast():
+                batch_out = model(batch_x)
+                batch_loss = criterion(batch_out, batch_y)
             running_loss += (batch_loss.item() * batch_size)
-            batch_loss.backward()
-            optimizer.step()
+            scaler.scale(batch_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
         running_loss /= num_total
         optimizer.zero_grad()
         del batch_loss, batch_x, batch_y, batch_out
         torch.cuda.empty_cache()
 
-        val_loss_w_aug = 0.0
-        val_loss_wo_aug = 0.0
-        num_total = 0.0
-        model.eval()
-        with torch.no_grad():
-            for batch_x, batch_y in dev_loader_w_aug:
-                batch_size = batch_x.size(0)
-                num_total += batch_size
-                batch_x = batch_x.to(device)
-                batch_y = batch_y.view(-1).type(torch.int64).to(device)
-                batch_out = model(batch_x)
-                batch_loss = criterion(batch_out, batch_y)
-                val_loss_w_aug += (batch_loss.item() * batch_size)
-            val_loss_w_aug /= num_total
-            optimizer.zero_grad()
-            del batch_loss, batch_x, batch_y, batch_out
-            torch.cuda.empty_cache()
+        do_val = (epoch % 5 == 1) or (epoch == num_epochs)
 
-            for batch_x, batch_y in dev_loader_wo_aug:
-                batch_size = batch_x.size(0)
-                num_total += batch_size
-                batch_x = batch_x.to(device)
-                batch_y = batch_y.view(-1).type(torch.int64).to(device)
-                batch_out = model(batch_x)
-                batch_loss = criterion(batch_out, batch_y)
-                val_loss_wo_aug += (batch_loss.item() * batch_size)
-            val_loss_wo_aug /= num_total
-            optimizer.zero_grad()
-            del batch_loss, batch_x, batch_y, batch_out
-            torch.cuda.empty_cache()
-        save_flag = False
-        if val_loss_w_aug <= loss_min_w_aug:
-            loss_min_w_aug = val_loss_w_aug
-            epoch_loss_w_aug = epoch
-            save_flag = True
-        if val_loss_wo_aug <= loss_min_wo_aug:
-            loss_min_wo_aug = val_loss_wo_aug
-            epoch_loss_wo_aug = epoch
-            save_flag = True
-        writer.add_scalar('val_loss_w_aug', val_loss_w_aug, epoch)
-        writer.add_scalar('loss', running_loss, epoch)
-        writer.add_scalar('val_loss_wo_aug', val_loss_wo_aug, epoch)
-        print('\n{}: tr_loss {:.5f}, -val_loss_w_aug {:.5f}, -val_loss_wo_aug {:.5f}, Best loss w/ aug: E{}/{:5f}, Best loss wo aug: E{}/{:.5f}'.format(epoch,
-                                                   running_loss, val_loss_w_aug, val_loss_wo_aug, epoch_loss_w_aug, loss_min_w_aug, epoch_loss_wo_aug, loss_min_wo_aug))
-        en_t = time.time()
-        print('time cost:', en_t - st_t)
-        if save_flag:
-            torch.save(model.state_dict(), os.path.join(model_save_path, 'epoch_{}.pth'.format(epoch)))
+        if do_val:
+            val_loss_w_aug = 0.0
+            val_loss_wo_aug = 0.0
+            num_total = 0.0
+            model.eval()
+            with torch.no_grad():
+                for batch_x, batch_y in dev_loader_w_aug:
+                    batch_size = batch_x.size(0)
+                    num_total += batch_size
+                    batch_x = batch_x.to(device)
+                    batch_y = batch_y.view(-1).type(torch.int64).to(device)
+                    batch_out = model(batch_x)
+                    batch_loss = criterion(batch_out, batch_y)
+                    val_loss_w_aug += (batch_loss.item() * batch_size)
+                val_loss_w_aug /= num_total
+                optimizer.zero_grad()
+                del batch_loss, batch_x, batch_y, batch_out
+                torch.cuda.empty_cache()
+
+                num_total = 0.0
+                for batch_x, batch_y in dev_loader_wo_aug:
+                    batch_size = batch_x.size(0)
+                    num_total += batch_size
+                    batch_x = batch_x.to(device)
+                    batch_y = batch_y.view(-1).type(torch.int64).to(device)
+                    batch_out = model(batch_x)
+                    batch_loss = criterion(batch_out, batch_y)
+                    val_loss_wo_aug += (batch_loss.item() * batch_size)
+                val_loss_wo_aug /= num_total
+                optimizer.zero_grad()
+                del batch_loss, batch_x, batch_y, batch_out
+                torch.cuda.empty_cache()
+            save_flag = False
+            if val_loss_w_aug <= loss_min_w_aug:
+                loss_min_w_aug = val_loss_w_aug
+                epoch_loss_w_aug = epoch
+                save_flag = True
+            if val_loss_wo_aug <= loss_min_wo_aug:
+                loss_min_wo_aug = val_loss_wo_aug
+                epoch_loss_wo_aug = epoch
+                save_flag = True
+            writer.add_scalar('val_loss_w_aug', val_loss_w_aug, epoch)
+            writer.add_scalar('val_loss_wo_aug', val_loss_wo_aug, epoch)
+            print('\n{}: tr_loss {:.5f}, val_loss_w_aug {:.5f}, val_loss_wo_aug {:.5f}, Best loss w/ aug: E{}/{:5f}, Best loss wo aug: E{}/{:.5f}'.format(epoch,
+                                                       running_loss, val_loss_w_aug, val_loss_wo_aug, epoch_loss_w_aug, loss_min_w_aug, epoch_loss_wo_aug, loss_min_wo_aug))
+            en_t = time.time()
+            print('time cost:', en_t - st_t)
+            if save_flag:
+                torch.save(model.state_dict(), os.path.join(model_save_path, 'epoch_{}.pth'.format(epoch)))
+        else:
+            print('{}: tr_loss {:.5f}, (val skipped)'.format(epoch, running_loss))
+            en_t = time.time()
+            print('time cost:', en_t - st_t)

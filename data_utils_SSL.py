@@ -1,9 +1,49 @@
 import numpy as np
 from torch import Tensor
+import torchaudio
+import soundfile as sf
 import librosa
 from torch.utils.data import Dataset
 from RawBoost import ISD_additive_noise,LnL_convolutive_noise,SSI_additive_noise,normWav
 import random
+import warnings
+
+
+def load_audio(path, sr=16000):
+    """Load audio file with robust fallback chain.
+
+    Tries torchaudio first (built-in FLAC support), then soundfile,
+    then librosa as a last resort.
+    """
+    # 1. Try torchaudio (most robust FLAC support)
+    try:
+        waveform, orig_sr = torchaudio.load(path)
+        # Convert to mono if stereo
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+        # Resample if needed
+        if orig_sr != sr:
+            resampler = torchaudio.transforms.Resample(orig_sr, sr)
+            waveform = resampler(waveform)
+        return waveform.squeeze(0).numpy(), sr
+    except Exception as e:
+        warnings.warn(f"torchaudio.load failed for {path}: {e}")
+
+    # 2. Try soundfile directly
+    try:
+        data, orig_sr = sf.read(path, dtype='float32')
+        # Convert to mono if stereo
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        # Resample if needed
+        if orig_sr != sr:
+            data = librosa.resample(data, orig_sr=orig_sr, target_sr=sr)
+        return data, sr
+    except Exception as e:
+        warnings.warn(f"soundfile.read failed for {path}: {e}")
+
+    # 3. Fall back to librosa (last resort)
+    return librosa.load(path, sr=sr)
 
 # modified by Tianchi @ NUS for probability-based RawBoost
 # original repo author:
@@ -69,7 +109,7 @@ class Dataset_ASVspoof2019_train(Dataset):
 	def __getitem__(self, index):
             
             utt_id = self.list_IDs[index]
-            X,fs = librosa.load(self.base_dir+'flac/'+utt_id+'.flac', sr=16000) 
+            X,fs = load_audio(self.base_dir+'flac/'+utt_id+'.flac', sr=16000)
             Y=process_Rawboost_feature(X,fs,self.args,self.algo)
             X_pad= pad(Y,self.cut)
             x_inp= Tensor(X_pad)
@@ -94,7 +134,7 @@ class Dataset_ASVspoof2021_eval(Dataset):
 	def __getitem__(self, index):
             
             utt_id = self.list_IDs[index]
-            X, fs = librosa.load(self.base_dir+'flac/'+utt_id+'.flac', sr=16000)
+            X, fs = load_audio(self.base_dir+'flac/'+utt_id+'.flac', sr=16000)
             X_pad = pad(X,self.cut)
             x_inp = Tensor(X_pad)
             return x_inp,utt_id  
@@ -115,7 +155,7 @@ class Dataset_ASVspoof2021_eval_no_cut(Dataset):
     def __getitem__(self, index):
             
             utt_id = self.list_IDs[index]
-            X, fs = librosa.load(self.base_dir+'flac/'+utt_id+'.flac', sr=16000)
+            X, fs = load_audio(self.base_dir+'flac/'+utt_id+'.flac', sr=16000)
             # X_pad = pad(X,self.cut)
             x_inp = Tensor(X)
             return x_inp,utt_id  
