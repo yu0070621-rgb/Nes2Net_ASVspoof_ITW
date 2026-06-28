@@ -41,7 +41,7 @@ def produce_evaluation_file(dataset, model, device, save_path, batch_size):
         fname_list = []
         score_list = []
         batch_x = batch_x.to(device)
-        batch_out = model(batch_x)
+        batch_out , _ = model(batch_x)
         batch_score = (batch_out[:, 1]
         ).data.cpu().numpy().ravel()
         # add outputs
@@ -74,7 +74,7 @@ if __name__ == '__main__':
                         help='number of output logits for the model, default is 2, following wav2vec2-AASIST repo')
     parser.add_argument('--date', type=str, default='unknown',
                         help='date')
-    parser.add_argument('--model_name', ..., choices=['wav2vec2_AASIST', 'wav2vec2_Nes2Net_X', 'wav2vec2_Nes2Net_X_SeLU'])                        help='the type of the model, check from the choices')
+    parser.add_argument('--model_name', type=str, required=True, choices=['wav2vec2_AASIST', 'wav2vec2_Nes2Net_X', 'wav2vec2_Nes2Net_X_SeLU', 'WavLM_Nes2Net_X'],help='the type of the model, check from the choices')
     parser.add_argument('--protocols_path', type=str, default='database/',
                         help='Change with path to user\'s LA database protocols directory address')
     parser.add_argument('--test_length', type=str, default='4s', choices=['full', '4s'],
@@ -212,6 +212,8 @@ if __name__ == '__main__':
         from model_scripts.wav2vec2_AASIST import Model
     elif args.model_name == 'wav2vec2_Nes2Net_X':
         from model_scripts.wav2vec2_Nes2Net_X import wav2vec2_Nes2Net_no_Res_w_allT as Model
+    elif args.model_name == 'WavLM_Nes2Net_X':                           # 新增
+        from model_scripts.wav2vec2_Nes2Net_X import wav2vec2_Nes2Net_no_Res_w_allT as Model  # 同一个类，但内部是 WavLM
     else:
         raise ValueError
     model = Model(args, device).to(device)
@@ -222,7 +224,37 @@ if __name__ == '__main__':
     print('num_params_SSL:', num_params_SSL)
 
     # set Adam optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # 分层学习率
+    base_lr = args.lr
+    decay_factor = 0.7
+    backend_lr_mult = 5.0
+
+    param_groups = []
+    wavlm_layers = model.ssl_model.model.encoder.layers  # 24 层 Transformer
+    num_layers = len(wavlm_layers)  # 应该是 24
+
+    for i, layer in enumerate(wavlm_layers):
+        # i=0 是最底层（离输入最近）， i=23 是最顶层
+        depth_from_top = num_layers - 1 - i  # 顶层=23, 底层=0
+        lr_mult = decay_factor ** depth_from_top  # 顶层=1.0, 每层×0.7
+        param_groups.append({
+            'params': layer.parameters(),
+            'lr': base_lr * lr_mult
+        })
+
+    # CNN 特征编码器：最低学习率
+    param_groups.append({
+        'params': model.ssl_model.model.feature_extractor.parameters(),
+        'lr': base_lr * (decay_factor ** num_layers)  # 极小
+    })
+
+    # Nes2Net 后端：最高学习率
+    param_groups.append({
+        'params': model.Nested_Res2Net_TDNN.parameters(),
+        'lr': base_lr * backend_lr_mult
+    })
+
+    optimizer = torch.optim.Adam(param_groups, lr=base_lr, weight_decay=args.weight_decay)
     scaler = GradScaler()
 
     # load model or average checkpoints
@@ -327,8 +359,8 @@ if __name__ == '__main__':
     num_epochs = args.num_epochs
     writer = SummaryWriter('logs/{}'.format(model_tag))
     # set objective (Loss) functions
-    weight = torch.FloatTensor([0.1, 0.9]).to(device)
-    criterion = nn.CrossEntropyLoss(weight=weight)
+    from loss_ocsoftmax import OCSoftmax
+    criterion = OCSoftmax(feat_dim=1024, r_real=0.9, r_fake=0.2, alpha=20.0).to(device)
     loss_min_w_aug = 999
     loss_min_wo_aug = 999
     epoch_loss_w_aug = 0
@@ -348,15 +380,15 @@ if __name__ == '__main__':
             batch_x = batch_x.to(device)
             batch_y = batch_y.view(-1).type(torch.int64).to(device)
             with autocast():
-                batch_out = model(batch_x)
-                batch_loss = criterion(batch_out, batch_y)
+                embedding , _ = model(batch_x)
+                batch_loss = criterion(embedding, batch_y)
             running_loss += (batch_loss.item() * batch_size)
             scaler.scale(batch_loss).backward()
             scaler.step(optimizer)
             scaler.update()
         running_loss /= num_total
         optimizer.zero_grad()
-        del batch_loss, batch_x, batch_y, batch_out
+        del batch_loss, batch_x, batch_y
         torch.cuda.empty_cache()
 
         do_val = (epoch % 5 == 1) or (epoch == num_epochs)
@@ -372,12 +404,12 @@ if __name__ == '__main__':
                     num_total += batch_size
                     batch_x = batch_x.to(device)
                     batch_y = batch_y.view(-1).type(torch.int64).to(device)
-                    batch_out = model(batch_x)
-                    batch_loss = criterion(batch_out, batch_y)
+                    embedding , _ = model(batch_x)
+                    batch_loss = criterion(embedding, batch_y)
                     val_loss_w_aug += (batch_loss.item() * batch_size)
                 val_loss_w_aug /= num_total
                 optimizer.zero_grad()
-                del batch_loss, batch_x, batch_y, batch_out
+                del batch_loss, batch_x, batch_y
                 torch.cuda.empty_cache()
 
                 num_total = 0.0
@@ -386,12 +418,12 @@ if __name__ == '__main__':
                     num_total += batch_size
                     batch_x = batch_x.to(device)
                     batch_y = batch_y.view(-1).type(torch.int64).to(device)
-                    batch_out = model(batch_x)
+                    batch_out , _ = model(batch_x)
                     batch_loss = criterion(batch_out, batch_y)
                     val_loss_wo_aug += (batch_loss.item() * batch_size)
                 val_loss_wo_aug /= num_total
                 optimizer.zero_grad()
-                del batch_loss, batch_x, batch_y, batch_out
+                del batch_loss, batch_x, batch_y
                 torch.cuda.empty_cache()
             save_flag = False
             if val_loss_w_aug <= loss_min_w_aug:

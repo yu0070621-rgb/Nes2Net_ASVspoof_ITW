@@ -38,7 +38,7 @@ class SEModule(nn.Module):
         self.se = nn.Sequential(
             nn.AdaptiveAvgPool1d(1),
             nn.Conv1d(channels, channels // SE_ratio, kernel_size=1, padding=0),
-            nn.ReLU(),
+            nn.SELU(),
             nn.Conv1d(channels // SE_ratio, channels, kernel_size=1, padding=0),
             nn.Sigmoid(),
         )
@@ -69,14 +69,14 @@ class Bottle2neck(nn.Module):
         self.bns    = nn.ModuleList(bns)
         self.conv3  = nn.Conv1d(width*scale, planes, kernel_size=1)
         self.bn3    = nn.BatchNorm1d(planes)
-        self.relu   = nn.ReLU()
+        self.selu   = nn.SELU()
         self.width  = width
         self.se = SEModule(planes,SE_ratio)
 
     def forward(self, x):
         residual = x
         out = self.conv1(x)
-        out = self.relu(out)
+        out = self.selu(out)
         out = self.bn1(out).unsqueeze(-1)  # bz c T 1
 
         spx = torch.split(out, self.width, 1)
@@ -84,7 +84,7 @@ class Bottle2neck(nn.Module):
         for i in range(self.nums):
           sp = torch.cat((sp, spx[i]), -1)
 
-          sp = self.bns[i](self.relu(self.convs[i](sp)))
+          sp = self.bns[i](self.selu(self.convs[i](sp)))
           sp_s = sp * self.weighted_sum[i]
           sp_s = torch.sum(sp_s, dim=-1, keepdim=False)
 
@@ -94,7 +94,7 @@ class Bottle2neck(nn.Module):
             out = torch.cat((out, sp_s), 1)
         out = torch.cat((out, spx[self.nums].squeeze(-1)),1)
         out = self.conv3(out)
-        out = self.relu(out)
+        out = self.selu(out)
         out = self.bn3(out)
         out = self.se(out)
         out += residual
@@ -165,7 +165,7 @@ class Nested_Res2Net_TDNN(nn.Module):
         self.Build_in_Res2Nets  = nn.ModuleList(Build_in_Res2Nets)
         self.bns  = nn.ModuleList(bns)
         self.bn = nn.BatchNorm1d(1024)
-        self.relu = nn.ReLU()
+        self.selu = nn.SELU()
         self.pool_func = pool_func
         if pool_func == 'mean':
             self.fc = nn.Linear(1024, n_output_logits)
@@ -181,7 +181,7 @@ class Nested_Res2Net_TDNN(nn.Module):
           else:
             sp = sp + spx[i]
           sp = self.Build_in_Res2Nets[i](sp)
-          sp = self.relu(sp)
+          sp = self.selu(sp)
           sp = self.bns[i](sp)
           if i==0:
             out = sp
@@ -189,13 +189,13 @@ class Nested_Res2Net_TDNN(nn.Module):
             out = torch.cat((out, sp), 1)
         out = torch.cat((out, spx[-1]),1)
         out = self.bn(out)
-        out = self.relu(out)
+        out = self.selu(out)
         if self.pool_func == 'mean':
-            out = torch.mean(out, dim=-1)
+            pooled = torch.mean(out, dim=-1)
         elif self.pool_func == 'ASTP':
-            out = self.pooling(out)
-        out = self.fc(out)
-        return out
+            pooled = self.pooling(out)
+        #out = self.fc(out)
+        return pooled
 
 class wav2vec2_Nes2Net_no_Res_w_allT(nn.Module):
     def __init__(self, args,device):
@@ -218,9 +218,9 @@ class wav2vec2_Nes2Net_no_Res_w_allT(nn.Module):
         #-------pre-trained Wav2vec model fine tunning ------------------------##
         x_ssl_feat = self.ssl_model.extract_feat(x.squeeze(-1))
         x_ssl_feat = x_ssl_feat.permute(0,2,1)
-        output = self.Nested_Res2Net_TDNN(x_ssl_feat)
-
-        return output
+        pooled = self.Nested_Res2Net_TDNN(x_ssl_feat)        # embedding
+        logits = self.Nested_Res2Net_TDNN.fc(pooled)          # (B, 2)
+        return pooled, logits
 
 if __name__ == '__main__':
     import argparse
