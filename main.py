@@ -360,7 +360,7 @@ if __name__ == '__main__':
     writer = SummaryWriter('logs/{}'.format(model_tag))
     # set objective (Loss) functions
     from loss_ocsoftmax import OCSoftmax
-    criterion = OCSoftmax(feat_dim=1024, r_real=0.9, r_fake=0.2, alpha=20.0).to(device)
+    criterion = OCSoftmax(feat_dim=1024).to(device)
     loss_min_w_aug = 999
     loss_min_wo_aug = 999
     epoch_loss_w_aug = 0
